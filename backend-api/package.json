@@ -1,0 +1,17 @@
+{
+  "name": "stex-backend-api",
+  "version": "0.1.0",
+  "description": "StEx 股票专家 - 后端 API 中间件",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "pg": "^8.12.0"
+  }
+}
