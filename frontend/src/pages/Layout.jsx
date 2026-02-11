@@ -7,6 +7,7 @@ export function Layout() {
     { path: '/selection', label: '选股' },
     { path: '/stock', label: '股票' },
     { path: '/workflow', label: '工作流' },
+    { path: '/weights', label: '权重' },
   ];
   return (
     <div className="layout">

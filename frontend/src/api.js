@@ -47,5 +47,8 @@ export const api = {
     getInvestmentSummaryPrompt: () => request('/api/config/investment-summary-prompt'),
     setInvestmentSummaryPrompt: (prompt) =>
       request('/api/config/investment-summary-prompt', { method: 'PUT', body: JSON.stringify({ prompt }) }),
+    getScoreWeights: () => request('/api/config/score-weights'),
+    setScoreWeights: (weights) =>
+      request('/api/config/score-weights', { method: 'PUT', body: JSON.stringify({ weights }) }),
   },
 };

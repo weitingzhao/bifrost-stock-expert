@@ -5,6 +5,7 @@ import { Selection } from './pages/Selection';
 import { StockList } from './pages/StockList';
 import { Stock } from './pages/Stock';
 import { Workflow } from './pages/Workflow';
+import { Weights } from './pages/Weights';
 import './App.css';
 
 function App() {
@@ -16,6 +17,7 @@ function App() {
         <Route path="stock" element={<StockList />} />
         <Route path="stock/:code" element={<Stock />} />
         <Route path="workflow" element={<Workflow />} />
+        <Route path="weights" element={<Weights />} />
       </Route>
     </Routes>
   );

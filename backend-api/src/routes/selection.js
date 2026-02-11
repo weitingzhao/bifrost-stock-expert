@@ -167,6 +167,59 @@ const SIGNAL_COLS_FOR_SCORE = [
   '成交量资金MA20', '成交量涨跌幅', '持续资金流向', '均线金叉死叉', '主力资金', '支撑阻力位', '新闻舆论', '换手率',
 ];
 
+// 综合分数权重默认值（与 /config/score-weights 一致）
+const DEFAULT_SCORE_WEIGHTS = {
+  marketBase: 1,
+  marketBullPerIndex: 0.1,
+  marketBearPerIndex: -0.1,
+  stockBull: 1,
+  stockBear: -2,
+  stockNeutralUp: 0.2,
+  stockNeutralDown: -0.2,
+  signalWeights: {
+    '成交量资金MA20': { bull: 1, bear: -2 },
+    '成交量涨跌幅': { bull: 1, bear: -2 },
+    '持续资金流向': { bull: 1, bear: -2 },
+    '均线金叉死叉': { bull: 1, bear: -2 },
+    '主力资金': { bull: 1, bear: -2 },
+    '支撑阻力位': { bull: 1, bear: -2 },
+    '新闻舆论': { bull: 1, bear: -2 },
+  },
+  turnover: {
+    low: -0.5,
+    normal: 0.3,
+    high: 0.1,
+  },
+};
+
+async function loadScoreWeights() {
+  const { rows } = await db.query(
+    'SELECT value FROM stex.app_config WHERE key = $1',
+    ['score_weights'],
+  );
+  const raw = rows[0]?.value;
+  let saved = {};
+  if (raw) {
+    try {
+      saved = JSON.parse(raw);
+    } catch {
+      saved = {};
+    }
+  }
+  return {
+    ...DEFAULT_SCORE_WEIGHTS,
+    ...saved,
+    turnover: {
+      ...DEFAULT_SCORE_WEIGHTS.turnover,
+      ...(saved.turnover || {}),
+    },
+    signalWeights: {
+      ...DEFAULT_SCORE_WEIGHTS.signalWeights,
+      ...(saved.signalWeights || {}),
+    },
+  };
+}
+
 // 收藏列表每只股票的投资信号（用于列表页「投资信号」Tab）。可选 ref_date 筛选指定日期的信号并对比次日股价
 selectionRouter.get('/watchlist-signals', async (req, res) => {
   const refDateParam = req.query.ref_date ? String(req.query.ref_date).trim().slice(0, 10) : null;
@@ -263,7 +316,16 @@ selectionRouter.get('/watchlist-signals', async (req, res) => {
     };
   });
 
-  // 综合分数：大盘分数（同期指数信号 看涨+0.1/看跌-0.1，初始1）× 个股分数（看涨+1/看跌-1，中性按大盘>1加0.2/<1减0.2），按综合分从高到低排序
+  // 综合分数：大盘分数（可配置：base + 看涨*权重/看跌*权重）× 个股分数（每个信号看涨/看跌/中性权重可配置，换手率单独权重），按综合分从高到低排序
+  const weights = await loadScoreWeights();
+  const marketBase = Number.isFinite(Number(weights.marketBase)) ? Number(weights.marketBase) : 1;
+  const marketBullPerIndex = Number.isFinite(Number(weights.marketBullPerIndex))
+    ? Number(weights.marketBullPerIndex)
+    : 0.1;
+  const marketBearPerIndex = Number.isFinite(Number(weights.marketBearPerIndex))
+    ? Number(weights.marketBearPerIndex)
+    : -0.1;
+
   const refDatesDistinct = [...new Set(out.map((r) => r.ref_date).filter(Boolean))];
   const marketScoreByDate = {};
   if (refDatesDistinct.length > 0) {
@@ -273,29 +335,47 @@ selectionRouter.get('/watchlist-signals', async (req, res) => {
       [INDEX_CODES_FOR_SCORING, refDatesDistinct]
     );
     for (const d of refDatesDistinct) {
-      let bull = 0, bear = 0;
+      let bull = 0;
+      let bear = 0;
       for (const s of indexSignals || []) {
         if (String(s.ref_date).slice(0, 10) !== d) continue;
         if (s.direction === '看涨') bull += 1;
         else if (s.direction === '看跌') bear += 1;
       }
-      marketScoreByDate[d] = 1 + 0.1 * bull - 0.1 * bear;
+      marketScoreByDate[d] = marketBase + marketBullPerIndex * bull + marketBearPerIndex * bear;
     }
   }
+
+  const stockBull = Number.isFinite(Number(weights.stockBull)) ? Number(weights.stockBull) : 1;
+  const stockBear = Number.isFinite(Number(weights.stockBear)) ? Number(weights.stockBear) : -2;
+  const stockNeutralUp = Number.isFinite(Number(weights.stockNeutralUp))
+    ? Number(weights.stockNeutralUp)
+    : 0.2;
+  const stockNeutralDown = Number.isFinite(Number(weights.stockNeutralDown))
+    ? Number(weights.stockNeutralDown)
+    : -0.2;
+  const turnoverWeights = weights.turnover || {};
+  const turnoverLow = Number.isFinite(Number(turnoverWeights.low)) ? Number(turnoverWeights.low) : -0.5;
+  const turnoverNormal = Number.isFinite(Number(turnoverWeights.normal)) ? Number(turnoverWeights.normal) : 0.3;
+  const turnoverHigh = Number.isFinite(Number(turnoverWeights.high)) ? Number(turnoverWeights.high) : 0.1;
+  const perSignalWeights = weights.signalWeights || {};
   for (const row of out) {
     const marketScore = row.ref_date ? (marketScoreByDate[row.ref_date] ?? 1) : 1;
     let stockRaw = 0;
     for (const col of SIGNAL_COLS_FOR_SCORE) {
       const v = row[col];
       if (col === '换手率') {
-        if (v === '交投清淡') stockRaw -= 0.5;
-        else if (v === '正常活跃') stockRaw += 0.3;
-        else if (v === '异常活跃') stockRaw += 0.1;
+        if (v === '交投清淡') stockRaw += turnoverLow;
+        else if (v === '正常活跃') stockRaw += turnoverNormal;
+        else if (v === '异常活跃') stockRaw += turnoverHigh;
         continue;
       }
-      if (v === '看涨') stockRaw += 1;
-      else if (v === '看跌') stockRaw -= 1;
-      else if (v === '中性') stockRaw += marketScore > 1 ? 0.2 : marketScore < 1 ? -0.2 : 0;
+      const sw = perSignalWeights[col] || {};
+      const bullW = Number.isFinite(Number(sw.bull)) ? Number(sw.bull) : stockBull;
+      const bearW = Number.isFinite(Number(sw.bear)) ? Number(sw.bear) : stockBear;
+      if (v === '看涨') stockRaw += bullW;
+      else if (v === '看跌') stockRaw += bearW;
+      else if (v === '中性') stockRaw += marketScore > 1 ? stockNeutralUp : marketScore < 1 ? stockNeutralDown : 0;
     }
     const composite = marketScore * stockRaw;
     row.composite_score = Number.isFinite(composite) ? Math.round(composite * 100) / 100 : null;
