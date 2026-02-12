@@ -496,22 +496,14 @@ const STRATEGY_NAMES = {
   tech_competition: '中美科技竞争战略',
   classic_pattern: '经典形态策略',
   trend_following: '趋势跟踪策略',
+  low_vol_breakout: '低量横盘放量突破',
   all_combined: '全策略综合',
 };
 
-selectionRouter.get('/strategy', async (req, res) => {
-  const { strategy, limit = 10000 } = req.query;
-  const strategyKey = String(strategy || '').toLowerCase();
-  const limitNum = Math.min(Number(limit) || 10000, 10000);
+const VALID_STRATEGY_KEYS = Object.keys(STRATEGY_NAMES);
 
-  if (!STRATEGY_NAMES[strategyKey]) {
-    return res.status(400).json({ error: 'strategy 需为 growth | tech_competition | classic_pattern | trend_following | all_combined' });
-  }
-
+function getStrategyCodeSubquery(strategyKey) {
   let codeSubquery = '';
-  const params = [];
-  let pi = 1;
-
   if (strategyKey === 'growth') {
     // 营收和利润：连续3季度环比增长 r1>r2>r3、p1>p2>p3；且最近一季同比去年同季增长 r1>r4、p1>p4（r4/p4 为第4期即去年同期）
     codeSubquery = `
@@ -652,9 +644,45 @@ selectionRouter.get('/strategy', async (req, res) => {
       GROUP BY code
       HAVING COUNT(DISTINCT sid) >= 3
     `;
+  } else if (strategyKey === 'low_vol_breakout') {
+    // 低量横盘放量突破：前 7～10 日低量横盘（量<0.8*20日均量、振幅<5%），当日放量≥30% 且收涨
+    codeSubquery = `
+      WITH base AS (
+        SELECT code, trade_date, close, volume,
+          LAG(close) OVER (PARTITION BY code ORDER BY trade_date) AS prev_close,
+          AVG(volume) OVER (PARTITION BY code ORDER BY trade_date ROWS BETWEEN 20 PRECEDING AND 1 PRECEDING) AS vol_ma20,
+          AVG(volume) OVER (PARTITION BY code ORDER BY trade_date ROWS BETWEEN 8 PRECEDING AND 2 PRECEDING) AS cons_vol_avg,
+          MAX(close) OVER (PARTITION BY code ORDER BY trade_date ROWS BETWEEN 8 PRECEDING AND 2 PRECEDING) AS cons_max,
+          MIN(close) OVER (PARTITION BY code ORDER BY trade_date ROWS BETWEEN 8 PRECEDING AND 2 PRECEDING) AS cons_min
+        FROM stex.stock_day
+      ),
+      with_range AS (
+        SELECT code, trade_date,
+          cons_vol_avg,
+          (cons_max - cons_min) / NULLIF((cons_max + cons_min) / 2, 0) * 100 AS range_pct,
+          volume, vol_ma20, prev_close, close
+        FROM base
+        WHERE vol_ma20 IS NOT NULL AND vol_ma20 > 0 AND prev_close IS NOT NULL
+      ),
+      breakout AS (
+        SELECT code, trade_date
+        FROM with_range
+        WHERE cons_vol_avg < 0.8 * vol_ma20
+          AND range_pct < 5
+          AND volume >= 1.3 * vol_ma20
+          AND close > prev_close
+          AND trade_date >= CURRENT_DATE - INTERVAL '60 days'
+      ),
+      latest_breakout AS (
+        SELECT code, MAX(trade_date) AS trade_date FROM breakout GROUP BY code
+      )
+      SELECT code FROM latest_breakout
+    `;
   }
+  return codeSubquery;
+}
 
-  params.push(limitNum);
+async function runStrategyAndFetchList(codeSubquery, limitNum) {
   const sql = `
     SELECT c.code, c.name, c.market, c.industry, c.sector,
            COALESCE(c.market_cap, f.market_cap) AS market_cap,
@@ -679,12 +707,113 @@ selectionRouter.get('/strategy', async (req, res) => {
       LIMIT 1
     ) d ON true
     ORDER BY c.code
-    LIMIT $${pi}
+    LIMIT $1
   `;
-  const { rows } = await db.query(sql, params);
+  const { rows } = await db.query(sql, [limitNum]);
+  return rows;
+}
+
+selectionRouter.get('/strategy', async (req, res) => {
+  const { strategy, limit = 10000 } = req.query;
+  const strategyKey = String(strategy || '').toLowerCase();
+  const limitNum = Math.min(Number(limit) || 10000, 10000);
+
+  if (!STRATEGY_NAMES[strategyKey]) {
+    return res.status(400).json({
+      error: `strategy 需为: ${VALID_STRATEGY_KEYS.filter(k => k !== 'all_combined').join(' | ')} | all_combined`,
+    });
+  }
+
+  const codeSubquery = getStrategyCodeSubquery(strategyKey);
+  if (!codeSubquery) {
+    return res.status(400).json({ error: '不支持的策略' });
+  }
+
+  const list = await runStrategyAndFetchList(codeSubquery, limitNum);
   res.json({
     strategy: strategyKey,
     strategyName: STRATEGY_NAMES[strategyKey],
+    list,
+  });
+});
+
+// 多策略选股：strategies 数组，combine 为 and（交集）或 or（并集）
+selectionRouter.get('/strategies', async (req, res) => {
+  const { strategies: strategiesParam, combine = 'or', limit = 10000 } = req.query;
+  const limitNum = Math.min(Number(limit) || 10000, 10000);
+  const combineMode = String(combine || 'or').toLowerCase() === 'and' ? 'and' : 'or';
+
+  const strategies = (typeof strategiesParam === 'string' ? strategiesParam.split(',') : [])
+    .map(s => String(s).trim().toLowerCase())
+    .filter(s => s && VALID_STRATEGY_KEYS.includes(s) && s !== 'all_combined');
+
+  if (strategies.length === 0) {
+    return res.status(400).json({ error: '请至少选择一个策略，如 strategies=growth,low_vol_breakout' });
+  }
+
+  const codeSets = [];
+  const strategyNames = [];
+  for (const key of strategies) {
+    const codeSubquery = getStrategyCodeSubquery(key);
+    if (!codeSubquery) continue;
+    const { rows } = await db.query(`SELECT code FROM (${codeSubquery}) x`, []);
+    codeSets.push({ key, name: STRATEGY_NAMES[key], codes: new Set(rows.map(r => r.code)) });
+    strategyNames.push(STRATEGY_NAMES[key]);
+  }
+
+  if (codeSets.length === 0) {
+    return res.json({ strategies: strategyNames, combine: combineMode, list: [] });
+  }
+
+  let combinedCodes;
+  if (combineMode === 'and') {
+    combinedCodes = codeSets[0].codes;
+    for (let i = 1; i < codeSets.length; i++) {
+      combinedCodes = new Set([...combinedCodes].filter(c => codeSets[i].codes.has(c)));
+    }
+  } else {
+    combinedCodes = new Set();
+    for (const { codes } of codeSets) {
+      codes.forEach(c => combinedCodes.add(c));
+    }
+  }
+
+  const codes = [...combinedCodes];
+  if (codes.length === 0) {
+    return res.json({ strategies: strategyNames, combine: combineMode, list: [] });
+  }
+
+  const placeholders = codes.map((_, i) => `$${i + 1}`).join(',');
+  const sql = `
+    SELECT c.code, c.name, c.market, c.industry, c.sector,
+           COALESCE(c.market_cap, f.market_cap) AS market_cap,
+           COALESCE(c.pe, f.pe) AS pe,
+           c.pb,
+           f.net_profit, f.profit_growth,
+           d.latest_close
+    FROM stex.corp c
+    INNER JOIN (SELECT unnest($1::text[]) AS code) s ON s.code = c.code
+    LEFT JOIN LATERAL (
+      SELECT market_cap, pe, net_profit, profit_growth
+      FROM stex.fundamentals
+      WHERE code = c.code
+      ORDER BY report_date DESC
+      LIMIT 1
+    ) f ON true
+    LEFT JOIN LATERAL (
+      SELECT close AS latest_close
+      FROM stex.stock_day
+      WHERE code = c.code
+      ORDER BY trade_date DESC
+      LIMIT 1
+    ) d ON true
+    ORDER BY c.code
+    LIMIT $2
+  `;
+  const { rows } = await db.query(sql, [codes, limitNum]);
+  res.json({
+    strategies: strategyNames,
+    combine: combineMode,
     list: rows,
   });
 });

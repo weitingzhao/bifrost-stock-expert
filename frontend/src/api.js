@@ -27,6 +27,8 @@ export const api = {
   selection: {
     filter: (params) => request(`/api/selection/filter?${new URLSearchParams(params)}`),
     strategy: (strategy, limit = 10000) => request(`/api/selection/strategy?strategy=${encodeURIComponent(strategy)}&limit=${limit}`),
+    strategies: (strategyKeys, combine = 'or', limit = 10000) =>
+      request(`/api/selection/strategies?strategies=${strategyKeys.map(k => encodeURIComponent(k)).join(',')}&combine=${combine}&limit=${limit}`),
     watchlist: () => request('/api/selection/watchlist'),
     watchlistSummary: () => request('/api/selection/watchlist-summary'),
     watchlistSignals: (refDate) =>

@@ -1,44 +1,29 @@
 import { useState, useEffect, useMemo } from 'react';
 import { api } from '../api';
-import { Link } from 'react-router-dom';
-
 const PAGE_SIZE = 30;
 
 const SELECTION_MODE = { data: 'data', strategy: 'strategy' };
 
-const STRATEGIES = [
-  {
-    key: 'growth',
-    name: '企业增长策略',
-    desc: '关注企业财务数据，财报披露：营收和利润连续 2 个季度增长且最新季度数据同比超过去年',
-  },
-  {
-    key: 'tech_competition',
-    name: '中美科技竞争战略',
-    desc: '在 AI、芯片、太空航天、新能源、机器人等领域具有战略地位、能避免卡脖子的企业',
-  },
-  {
-    key: 'classic_pattern',
-    name: '经典形态策略',
-    desc: '计算K线图：K 线杯柄形态、上升三法等经典形态，识别“上涨中继”的特定K线模式',
-  },
-  {
-    key: 'trend_following',
-    name: '趋势跟踪策略',
-    desc: '计算K线图：均线多头排列且回踩不破，系统化捕捉创新高行情（海龟交易思路）',
-  },
-  {
-    key: 'all_combined',
-    name: '全策略综合',
-    desc: '上述 4 种策略中至少满足 3 种的股票（企业增长、科技竞争、经典形态、趋势跟踪）',
-  },
+// 可多选参与组合的策略（不含 all_combined）
+const STRATEGIES_MULTI = [
+  { key: 'growth', name: '企业增长策略', desc: '关注企业财务数据，财报披露：营收和利润连续 2 个季度增长且最新季度数据同比超过去年' },
+  { key: 'tech_competition', name: '中美科技竞争战略', desc: '在 AI、芯片、太空航天、新能源、机器人等领域具有战略地位、能避免卡脖子的企业' },
+  { key: 'classic_pattern', name: '经典形态策略', desc: '计算K线图：K 线杯柄形态、上升三法等经典形态，识别“上涨中继”的特定K线模式' },
+  { key: 'trend_following', name: '趋势跟踪策略', desc: '计算K线图：均线多头排列且回踩不破，系统化捕捉创新高行情（海龟交易思路）' },
+  { key: 'low_vol_breakout', name: '低量横盘放量突破', desc: '前 7～10 日低量横盘（量低于 20 日均量、振幅＜5%），当日放量至少 30% 且收涨突破' },
+];
+const STRATEGIES_SINGLE = [
+  ...STRATEGIES_MULTI,
+  { key: 'all_combined', name: '全策略综合', desc: '企业增长、科技竞争、经典形态、趋势跟踪 4 种策略中至少满足 3 种的股票' },
 ];
 
 export function Selection() {
   const [selectionMode, setSelectionMode] = useState(SELECTION_MODE.data);
   const [watchlist, setWatchlist] = useState([]);
   const [filterResult, setFilterResult] = useState([]);
-  const [strategyResult, setStrategyResult] = useState({ strategyName: '', list: [] });
+  const [strategyResult, setStrategyResult] = useState({ strategyName: '', strategies: [], combine: '', list: [] });
+  const [selectedStrategies, setSelectedStrategies] = useState([]);
+  const [combineMode, setCombineMode] = useState('or');
   const [industries, setIndustries] = useState({ industries: [], sectors: [], markets: [] });
   const [loading, setLoading] = useState(false);
   const [strategyLoading, setStrategyLoading] = useState(false);
@@ -78,9 +63,47 @@ export function Selection() {
     setStrategyLoading(true);
     setPage(1);
     api.selection.strategy(strategyKey, 10000)
-      .then((res) => setStrategyResult({ strategyName: res.strategyName || STRATEGIES.find(s => s.key === res.strategy)?.name || '', list: res.list || [] }))
-      .catch(() => setStrategyResult({ strategyName: '', list: [] }))
+      .then((res) => setStrategyResult({
+        strategyName: res.strategyName || STRATEGIES_SINGLE.find(s => s.key === res.strategy)?.name || '',
+        strategies: res.strategies || [],
+        combine: res.combine || '',
+        list: res.list || [],
+      }))
+      .catch(() => setStrategyResult({ strategyName: '', strategies: [], combine: '', list: [] }))
       .finally(() => setStrategyLoading(false));
+  };
+
+  const toggleStrategy = (key) => {
+    setSelectedStrategies((prev) =>
+      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]
+    );
+  };
+
+  const runSelectedStrategies = () => {
+    if (selectedStrategies.length === 0) return;
+    setStrategyLoading(true);
+    setPage(1);
+    if (selectedStrategies.length === 1) {
+      api.selection.strategy(selectedStrategies[0], 10000)
+        .then((res) => setStrategyResult({
+          strategyName: res.strategyName || STRATEGIES_SINGLE.find(s => s.key === res.strategy)?.name || '',
+          strategies: [],
+          combine: '',
+          list: res.list || [],
+        }))
+        .catch(() => setStrategyResult({ strategyName: '', strategies: [], combine: '', list: [] }))
+        .finally(() => setStrategyLoading(false));
+    } else {
+      api.selection.strategies(selectedStrategies, combineMode, 10000)
+        .then((res) => setStrategyResult({
+          strategyName: res.strategies?.join(combineMode === 'and' ? ' + ' : '、') || '',
+          strategies: res.strategies || [],
+          combine: res.combine || combineMode,
+          list: res.list || [],
+        }))
+        .catch(() => setStrategyResult({ strategyName: '', strategies: [], combine: '', list: [] }))
+        .finally(() => setStrategyLoading(false));
+    }
   };
 
   const displayList = selectionMode === SELECTION_MODE.data ? filterResult : strategyResult.list;
@@ -129,7 +152,7 @@ export function Selection() {
         <div className="watchlist-chips">
           {watchlist.map(row => (
             <span key={row.code} className="watchlist-chip">
-              <Link to={`/stock/${row.code}`} className="watchlist-chip-link">{row.code} {row.name || ''}</Link>
+              <a href={`/stock/${row.code}`} target="_blank" rel="noopener noreferrer" className="watchlist-chip-link">{row.code} {row.name || ''}</a>
               <button type="button" className="watchlist-chip-remove" onClick={e => removeWatch(row.code, e)} title="取消跟踪" aria-label="取消跟踪">×</button>
             </span>
           ))}
@@ -189,9 +212,55 @@ export function Selection() {
 
         {selectionMode === SELECTION_MODE.strategy && (
           <>
-            <p className="muted">按既定策略筛选股票，一键得到符合策略的标的池。若需覆盖全市场，请先在「工作流」中多次执行「全市场数据采集」以拉取更多股票的日线/财务/技术数据。</p>
+            <p className="muted">按既定策略筛选股票，可多选策略组合筛选（满足全部/满足任一）。若需覆盖全市场，请先在「工作流」中多次执行「全市场数据采集」以拉取更多股票的日线/财务/技术数据。</p>
+            <div className="strategy-multi-section">
+              <div className="strategy-multi-row">
+                <span className="strategy-multi-label">多选策略：</span>
+                <div className="strategy-checkboxes">
+                  {STRATEGIES_MULTI.map((s) => (
+                    <label key={s.key} className="strategy-checkbox-label">
+                      <input
+                        type="checkbox"
+                        checked={selectedStrategies.includes(s.key)}
+                        onChange={() => toggleStrategy(s.key)}
+                      />
+                      <span>{s.name}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <div className="strategy-multi-row">
+                <span className="strategy-multi-label">组合方式：</span>
+                <label className="strategy-radio-label">
+                  <input
+                    type="radio"
+                    name="combine"
+                    checked={combineMode === 'or'}
+                    onChange={() => setCombineMode('or')}
+                  />
+                  满足任一
+                </label>
+                <label className="strategy-radio-label">
+                  <input
+                    type="radio"
+                    name="combine"
+                    checked={combineMode === 'and'}
+                    onChange={() => setCombineMode('and')}
+                  />
+                  满足全部
+                </label>
+              </div>
+              <button
+                type="button"
+                className="strategy-card-btn strategy-run-selected"
+                onClick={runSelectedStrategies}
+                disabled={strategyLoading || selectedStrategies.length === 0}
+              >
+                {strategyLoading ? '运行中…' : selectedStrategies.length === 0 ? '请至少勾选一个策略' : `运行所选策略（${selectedStrategies.length} 个）`}
+              </button>
+            </div>
             <div className="strategy-cards">
-              {STRATEGIES.map((s) => (
+              {STRATEGIES_SINGLE.map((s) => (
                 <div key={s.key} className={`strategy-card strategy-card--${s.key}`}>
                   <div className="strategy-card-head">{s.name}</div>
                   <p className="strategy-card-desc">{s.desc}</p>
@@ -206,8 +275,11 @@ export function Selection() {
                 </div>
               ))}
             </div>
-            {strategyResult.strategyName && (
-              <p className="muted strategy-result-label">当前结果：{strategyResult.strategyName}，共 {strategyResult.list.length} 只</p>
+            {strategyResult.strategyName && strategyResult.list.length >= 0 && (
+              <p className="muted strategy-result-label">
+                当前结果：{strategyResult.strategyName}
+                {strategyResult.combine ? `（${strategyResult.combine === 'and' ? '满足全部' : '满足任一'}）` : ''}，共 {strategyResult.list.length} 只
+              </p>
             )}
           </>
         )}
@@ -239,7 +311,7 @@ export function Selection() {
             <tbody>
               {pageResult.map(row => (
                 <tr key={row.code}>
-                  <td><Link to={`/stock/${row.code}`}>{row.code}</Link></td>
+                  <td><a href={`/stock/${row.code}`} target="_blank" rel="noopener noreferrer">{row.code}</a></td>
                   <td>{row.name}</td>
                   <td>{row.market || '-'}</td>
                   <td>{row.industry}</td>
@@ -261,7 +333,7 @@ export function Selection() {
           </table>
           {sortedResult.length === 0 && !loading && !strategyLoading && (
             <p className="muted">
-              {selectionMode === SELECTION_MODE.data ? '暂无数据或未执行筛选。' : '请在上方选择一种策略并点击「运行该策略」。经典形态策略需先执行形态识别任务写入数据。'}
+              {selectionMode === SELECTION_MODE.data ? '暂无数据或未执行筛选。' : '请勾选一个或多个策略后点击「运行所选策略」，或点击某策略卡片上的「运行该策略」。经典形态策略需先执行形态识别任务。'}
             </p>
           )}
           {sortedResult.length > 0 && (

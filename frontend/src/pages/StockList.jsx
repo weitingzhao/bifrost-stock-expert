@@ -1,5 +1,4 @@
 import { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
 import { Tiny } from '@ant-design/charts';
 import { api } from '../api';
 
@@ -328,7 +327,7 @@ export function StockList() {
                   <tbody>
                     {summary.map(row => (
                       <tr key={row.code}>
-                        <td><Link to={`/stock/${row.code}`}>{row.code}</Link></td>
+                        <td><a href={`/stock/${row.code}`} target="_blank" rel="noopener noreferrer">{row.code}</a></td>
                         <td>{row.name || '-'}</td>
                         <td>{row.market || '-'}</td>
                         <td>{fmtPrice(row.close)}</td>
@@ -339,7 +338,7 @@ export function StockList() {
                         <td className={pctClass(row.monthly_pct)}><span className="pct-icon" aria-hidden>{pctIcon(row.monthly_pct)}</span>{fmtPct(row.monthly_pct)}</td>
                         <td className={pctClass(row.monthly_3_pct)}><span className="pct-icon" aria-hidden>{pctIcon(row.monthly_3_pct)}</span>{fmtPct(row.monthly_3_pct)}</td>
                         <td className="table-actions">
-                          <Link to={`/stock/${row.code}`} className="action-link">详情</Link>
+                          <a href={`/stock/${row.code}`} target="_blank" rel="noopener noreferrer" className="action-link">详情</a>
                           <span className="table-action-sep"> </span>
                           <button type="button" className="action-link" onClick={() => runCollectStock(row.code)} disabled={updatingCode === row.code}>
                             {updatingCode === row.code ? '更新中…' : '更新'}
@@ -401,7 +400,7 @@ export function StockList() {
                   <tbody>
                     {signalsRows.map(row => (
                       <tr key={row.code}>
-                        <td><Link to={`/stock/${row.code}`}>{row.code}</Link></td>
+                        <td><a href={`/stock/${row.code}`} target="_blank" rel="noopener noreferrer">{row.code}</a></td>
                         <td>{row.name || '-'}</td>
                         <td>{fmtDate(String(row.ref_date || '').replace(/-/g, ''))}</td>
                         <td className={pctClass(row.next_day_pct)}>{fmtPct(row.next_day_pct)}</td>
@@ -410,7 +409,7 @@ export function StockList() {
                           <td key={col} className={directionClass(row[col])}>{row[col] ?? '-'}</td>
                         ))}
                         <td className="table-actions">
-                          <Link to={`/stock/${row.code}`} className="action-link">详情</Link>
+                          <a href={`/stock/${row.code}`} target="_blank" rel="noopener noreferrer" className="action-link">详情</a>
                         </td>
                       </tr>
                     ))}
