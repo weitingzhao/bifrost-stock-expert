@@ -212,14 +212,16 @@ def _signal_sustained_mf(
     mf: dict,
     look_days: int = 5,
 ) -> tuple[str, str]:
-    """3-5日持续净流入/净流出：持续净流入→看涨；持续净流出→看跌；否则中性"""
+    """3-5日持续净流入/净流出：持续净流入→看涨；持续净流出→看跌；否则中性。依赖 stex.moneyflow，需先执行「采集跟踪股票数据」或「增量日线」写入资金流向。"""
+    if not mf:
+        return DIR_NONE, "无资金流向数据，请先执行「采集跟踪股票数据」并确认 Tushare 有资金流向权限(2000+积分)"
     dates_sorted = sorted(mf.keys(), reverse=True)
     if td not in dates_sorted:
-        return DIR_NONE, "无该日资金数据"
+        return DIR_NONE, "无该日资金数据（需先执行采集跟踪股票数据或增量日线）"
     pos = dates_sorted.index(td)
     window = dates_sorted[pos : pos + look_days]
     if len(window) < look_days:
-        return DIR_NEUTRAL, "不足连续天数"
+        return DIR_NEUTRAL, f"不足连续{look_days}日资金数据（当前仅{len(window)}日）"
     amounts = [mf.get(d, {}).get("net_mf_amount") for d in window]
     if any(x is None for x in amounts):
         return DIR_NEUTRAL, "部分日无净流入额"

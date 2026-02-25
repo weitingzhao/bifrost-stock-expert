@@ -29,7 +29,8 @@ const TASK_TYPES = [
     label: '增量日线(最新)',
     taskType: '采集',
     needCodes: false,
-    description: '按「最近一个交易日（含今日）」快速更新全市场日线与指标',
+    needStartDate: true,
+    description: '按「最近一个交易日」或可填起始日期更新全市场日线；',
   },
   {
     id: 'collect_index',
@@ -145,6 +146,7 @@ export function Workflow() {
   const [message, setMessage] = useState('');
   const [codesByTask, setCodesByTask] = useState({}); // collect_stock / analyze 的代码输入
   const [batchesByTask, setBatchesByTask] = useState({}); // 批次数：collect_full_market / parse_corp_batch
+  const [incrementalStartDate, setIncrementalStartDate] = useState(''); // 增量日线：起始日期 YYYY-MM-DD，空则仅拉最近一交易日
   const [page, setPage] = useState(1);
 
   const fetchLogs = () => {
@@ -177,6 +179,9 @@ export function Workflow() {
     const batches = (task.id === 'collect_full_market' || task.id === 'parse_corp_batch')
       ? Number(batchesByTask[task.id] || 1)
       : undefined;
+    const startDate = task.id === 'incremental_daily' && incrementalStartDate
+      ? incrementalStartDate.trim()
+      : undefined;
     if (needCodes && (!codes || !codes.length)) {
       setMessage(`任务「${task.label}」需填写至少一个股票代码`);
       return;
@@ -184,7 +189,7 @@ export function Workflow() {
     setTriggering(task.id);
     setMessage('');
     api.workflow
-      .trigger({ action: task.id, codes, batches })
+      .trigger({ action: task.id, codes, batches, start_date: startDate })
       .then((res) => {
         setMessage(JSON.stringify(res, null, 2));
         fetchLogs();
@@ -230,6 +235,16 @@ export function Workflow() {
                     title={task.id === 'collect_full_market'
                       ? '一次触发串行跑多批，每批约 80 只，批次间隔约 60 秒'
                       : '批量解析企业：串行多批，每批约 50 只，批次间隔约 5 秒'}
+                  />
+                )}
+                {task.needStartDate && (
+                  <input
+                    type="date"
+                    className="workflow-task-start-date"
+                    placeholder="起始日期"
+                    value={incrementalStartDate}
+                    onChange={(e) => setIncrementalStartDate(e.target.value)}
+                    title="可选。填写后拉取该日（含）至最近交易日的全部交易日数据；不填则仅拉最近一个交易日"
                   />
                 )}
                 <button

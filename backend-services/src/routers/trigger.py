@@ -30,6 +30,7 @@ class TriggerBody(BaseModel):
     batch_size: Optional[int] = None  # collect_full_market 每批数量，默认 80
     industry: Optional[str] = None  # parse_corp_batch 时可选：行业名，逗号分隔，不传则用默认科技/制造行业
     batches: Optional[int] = None  # collect_full_market / parse_corp_batch 时：连续批次数，默认 1
+    start_date: Optional[str] = None  # incremental_daily 时可选：起始日期 YYYY-MM-DD 或 YYYYMMDD，拉取该日（含）之后到最近交易日
 
 
 @router.post("/trigger")
@@ -569,7 +570,7 @@ async def trigger(body: TriggerBody):
                 row = cur.fetchone()
                 log_id = row[0] if row else None
             conn.commit()
-        result = run_incremental_daily_agent()
+        result = run_incremental_daily_agent(start_date=body.start_date)
         status = "success" if result.get("ok") else "failed"
         with get_conn() as conn:
             with conn.cursor() as cur:
@@ -662,7 +663,7 @@ async def trigger(body: TriggerBody):
 
         # 1. 增量日线（最新交易日，含今日）
         try:
-            result = run_incremental_daily_agent()
+            result = run_incremental_daily_agent(start_date=body.start_date)
             ok = result.get("ok", False)
             steps_summary.append({"step": "incremental_daily", "ok": ok, "result": result})
             if not ok:

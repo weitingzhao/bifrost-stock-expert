@@ -31,6 +31,9 @@ export const api = {
       request(`/api/selection/strategies?strategies=${strategyKeys.map(k => encodeURIComponent(k)).join(',')}&combine=${combine}&limit=${limit}`),
     watchlist: () => request('/api/selection/watchlist'),
     watchlistSummary: () => request('/api/selection/watchlist-summary'),
+    topRecommended: (top = 10) => request(`/api/selection/top-recommended?top=${top}`),
+    recommendationDates: () => request('/api/selection/recommendations/dates'),
+    recommendations: (date) => request(date ? `/api/selection/recommendations?date=${encodeURIComponent(date)}` : '/api/selection/recommendations'),
     watchlistSignals: (refDate) =>
       request(refDate ? `/api/selection/watchlist-signals?ref_date=${encodeURIComponent(refDate)}` : '/api/selection/watchlist-signals'),
     indexSignals: (refDate) =>

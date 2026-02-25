@@ -817,3 +817,291 @@ selectionRouter.get('/strategies', async (req, res) => {
     list: rows,
   });
 });
+
+// 综合推荐：取 watchlist 综合得分前 10 名，调用 LLM 以资深交易员身份分析建仓操作
+selectionRouter.get('/top-recommended', async (req, res) => {
+  const topN = Math.min(Number(req.query.top) || 10, 20);
+
+  // 1) 获取 watchlist 信号（复用 watchlist-signals 的逻辑）
+  const { rows: watchlist } = await db.query(`
+    SELECT w.code, c.name
+    FROM stex.watchlist w
+    LEFT JOIN stex.corp c ON c.code = w.code
+    ORDER BY w.updated_at DESC
+  `);
+  if (watchlist.length === 0) {
+    return res.json({ ok: false, error: '暂无跟踪股票', stocks: [] });
+  }
+
+  const { rows: signals } = await db.query(
+    `SELECT s.code, s.ref_date, s.signal_type, s.direction, s.reason
+     FROM stex.signals s
+     INNER JOIN stex.watchlist w ON w.code = s.code
+     WHERE s.ref_date IS NOT NULL
+     ORDER BY s.code, s.ref_date DESC`
+  );
+
+  const byCode = {};
+  for (const w of watchlist) {
+    byCode[w.code] = { code: w.code, name: w.name || '-', ref_date: null, signals: {}, reasons: {} };
+  }
+  for (const s of signals) {
+    const code = s.code;
+    const refDate = s.ref_date ? String(s.ref_date).slice(0, 10) : null;
+    if (!byCode[code]) continue;
+    const rec = byCode[code];
+    if (rec.ref_date == null) rec.ref_date = refDate;
+    if (refDate === rec.ref_date) {
+      rec.signals[s.signal_type] = s.direction || '-';
+      rec.reasons[s.signal_type] = s.reason || '';
+    }
+  }
+
+  // 2) 计算综合分数
+  const weights = await loadScoreWeights();
+  const marketBase = Number.isFinite(Number(weights.marketBase)) ? Number(weights.marketBase) : 1;
+  const marketBullPerIndex = Number.isFinite(Number(weights.marketBullPerIndex)) ? Number(weights.marketBullPerIndex) : 0.1;
+  const marketBearPerIndex = Number.isFinite(Number(weights.marketBearPerIndex)) ? Number(weights.marketBearPerIndex) : -0.1;
+
+  const refDatesDistinct = [...new Set(Object.values(byCode).map(r => r.ref_date).filter(Boolean))];
+  const marketScoreByDate = {};
+  if (refDatesDistinct.length > 0) {
+    const { rows: indexSignals } = await db.query(
+      `SELECT ref_date, direction FROM stex.signals
+       WHERE code = ANY($1::text[]) AND ref_date = ANY($2::date[])`,
+      [INDEX_CODES_FOR_SCORING, refDatesDistinct]
+    );
+    for (const d of refDatesDistinct) {
+      let bull = 0, bear = 0;
+      for (const s of indexSignals || []) {
+        if (String(s.ref_date).slice(0, 10) !== d) continue;
+        if (s.direction === '看涨') bull += 1;
+        else if (s.direction === '看跌') bear += 1;
+      }
+      marketScoreByDate[d] = marketBase + marketBullPerIndex * bull + marketBearPerIndex * bear;
+    }
+  }
+
+  const stockBull = Number.isFinite(Number(weights.stockBull)) ? Number(weights.stockBull) : 1;
+  const stockBear = Number.isFinite(Number(weights.stockBear)) ? Number(weights.stockBear) : -2;
+  const stockNeutralUp = Number.isFinite(Number(weights.stockNeutralUp)) ? Number(weights.stockNeutralUp) : 0.2;
+  const stockNeutralDown = Number.isFinite(Number(weights.stockNeutralDown)) ? Number(weights.stockNeutralDown) : -0.2;
+  const turnoverWeights = weights.turnover || {};
+  const turnoverLow = Number.isFinite(Number(turnoverWeights.low)) ? Number(turnoverWeights.low) : -0.5;
+  const turnoverNormal = Number.isFinite(Number(turnoverWeights.normal)) ? Number(turnoverWeights.normal) : 0.3;
+  const turnoverHigh = Number.isFinite(Number(turnoverWeights.high)) ? Number(turnoverWeights.high) : 0.1;
+  const perSignalWeights = weights.signalWeights || {};
+
+  const scored = [];
+  for (const row of Object.values(byCode)) {
+    const marketScore = row.ref_date ? (marketScoreByDate[row.ref_date] ?? 1) : 1;
+    let stockRaw = 0;
+    for (const col of SIGNAL_COLS_FOR_SCORE) {
+      const v = row.signals[col];
+      if (col === '换手率') {
+        if (v === '交投清淡') stockRaw += turnoverLow;
+        else if (v === '正常活跃') stockRaw += turnoverNormal;
+        else if (v === '异常活跃') stockRaw += turnoverHigh;
+        continue;
+      }
+      const sw = perSignalWeights[col] || {};
+      const bullW = Number.isFinite(Number(sw.bull)) ? Number(sw.bull) : stockBull;
+      const bearW = Number.isFinite(Number(sw.bear)) ? Number(sw.bear) : stockBear;
+      if (v === '看涨') stockRaw += bullW;
+      else if (v === '看跌') stockRaw += bearW;
+      else if (v === '中性') stockRaw += marketScore > 1 ? stockNeutralUp : marketScore < 1 ? stockNeutralDown : 0;
+    }
+    const composite = marketScore * stockRaw;
+    row.composite_score = Number.isFinite(composite) ? Math.round(composite * 100) / 100 : null;
+    scored.push(row);
+  }
+  scored.sort((a, b) => (b.composite_score ?? -Infinity) - (a.composite_score ?? -Infinity));
+
+  const topStocks = scored.slice(0, topN).filter(s => s.composite_score != null && s.composite_score > 0);
+  if (topStocks.length === 0) {
+    return res.json({ ok: false, error: '暂无综合得分为正的股票', stocks: [] });
+  }
+
+  // 3) 获取股票基础信息（最新收盘价、PE 等）
+  const topCodes = topStocks.map(s => s.code);
+  const { rows: stockInfo } = await db.query(`
+    SELECT c.code, c.name, c.market, c.industry,
+           COALESCE(c.pe, f.pe) AS pe,
+           d.close AS latest_close, d.trade_date AS latest_date
+    FROM stex.corp c
+    LEFT JOIN LATERAL (
+      SELECT pe FROM stex.fundamentals WHERE code = c.code ORDER BY report_date DESC LIMIT 1
+    ) f ON true
+    LEFT JOIN LATERAL (
+      SELECT close, trade_date FROM stex.stock_day WHERE code = c.code ORDER BY trade_date DESC LIMIT 1
+    ) d ON true
+    WHERE c.code = ANY($1::text[])
+  `, [topCodes]);
+  const infoMap = {};
+  for (const r of stockInfo) infoMap[r.code] = r;
+
+  // 4) 调用 Python 服务的 LLM 进行分析
+  const PYTHON_URL = process.env.PYTHON_SERVICE_URL || 'http://localhost:8100';
+  const llmResults = [];
+  for (const stock of topStocks) {
+    const info = infoMap[stock.code] || {};
+    const signalSummary = SIGNAL_COLS_FOR_SCORE.map(col => {
+      const dir = stock.signals[col] || '无';
+      const reason = stock.reasons[col] || '';
+      return `${col}: ${dir}${reason ? '（' + reason.slice(0, 50) + '）' : ''}`;
+    }).join('\n');
+
+    const prompt = `你是一位资深 A 股交易员，拥有 20 年实战经验。请根据以下股票的最新投资信号数据，以专业、简洁的语言分析该股票当前的建仓策略。
+
+股票：${stock.code} ${stock.name || info.name || ''}
+行业：${info.industry || '未知'}
+最新价：${info.latest_close || '未知'}
+市盈率：${info.pe || '未知'}
+综合信号得分：${stock.composite_score}
+信号日期：${stock.ref_date || '未知'}
+
+各项投资信号：
+${signalSummary}
+
+请输出（控制在 200 字以内）：
+1. 当前建仓建议（是否适合建仓、建议仓位比例如 10%-30%）
+2. 建议买入价位区间
+3. 止损/止盈策略
+4. 需关注的关键风险点
+
+注意：简洁专业，不需要客套话。`;
+
+    try {
+      const resp = await fetch(`${PYTHON_URL}/api/llm/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt, max_tokens: 800 }),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        llmResults.push({
+          code: stock.code,
+          name: stock.name || info.name || '',
+          industry: info.industry || '',
+          latest_close: info.latest_close,
+          pe: info.pe,
+          composite_score: stock.composite_score,
+          ref_date: stock.ref_date,
+          signals: stock.signals,
+          analysis: data.content || data.result || '（分析生成失败）',
+        });
+      } else {
+        llmResults.push({
+          code: stock.code,
+          name: stock.name || info.name || '',
+          industry: info.industry || '',
+          latest_close: info.latest_close,
+          pe: info.pe,
+          composite_score: stock.composite_score,
+          ref_date: stock.ref_date,
+          signals: stock.signals,
+          analysis: '（LLM 服务调用失败）',
+        });
+      }
+    } catch (e) {
+      llmResults.push({
+        code: stock.code,
+        name: stock.name || info.name || '',
+        industry: info.industry || '',
+        latest_close: info.latest_close,
+        pe: info.pe,
+        composite_score: stock.composite_score,
+        ref_date: stock.ref_date,
+        signals: stock.signals,
+        analysis: `（LLM 调用异常: ${e.message}）`,
+      });
+    }
+  }
+
+  // 5) 保存推荐结果到数据库（每个日期每只股票只保留最新一份）
+  const today = new Date().toISOString().slice(0, 10);
+  for (const r of llmResults) {
+    try {
+      await db.query(
+        `INSERT INTO stex.recommendations (ref_date, code, name, industry, latest_close, pe, composite_score, signals, analysis)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (ref_date, code) DO UPDATE SET
+           name = EXCLUDED.name,
+           industry = EXCLUDED.industry,
+           latest_close = EXCLUDED.latest_close,
+           pe = EXCLUDED.pe,
+           composite_score = EXCLUDED.composite_score,
+           signals = EXCLUDED.signals,
+           analysis = EXCLUDED.analysis,
+           created_at = NOW()`,
+        [today, r.code, r.name, r.industry, r.latest_close, r.pe, r.composite_score, JSON.stringify(r.signals), r.analysis]
+      );
+    } catch (e) {
+      console.error('保存推荐结果失败:', r.code, e.message);
+    }
+  }
+
+  res.json({
+    ok: true,
+    count: llmResults.length,
+    ref_date: today,
+    stocks: llmResults,
+  });
+});
+
+// 获取历史推荐日期列表
+selectionRouter.get('/recommendations/dates', async (req, res) => {
+  const { rows } = await db.query(
+    `SELECT DISTINCT ref_date FROM stex.recommendations ORDER BY ref_date DESC LIMIT 60`
+  );
+  res.json({
+    dates: rows.map(r => r.ref_date instanceof Date ? r.ref_date.toISOString().slice(0, 10) : String(r.ref_date).slice(0, 10)),
+  });
+});
+
+// 获取指定日期的推荐结果
+selectionRouter.get('/recommendations', async (req, res) => {
+  const { date } = req.query;
+  let refDate = date ? String(date).trim().slice(0, 10) : null;
+  
+  // 如果没有指定日期，取最新一天
+  if (!refDate) {
+    const { rows: latest } = await db.query(
+      `SELECT ref_date FROM stex.recommendations ORDER BY ref_date DESC LIMIT 1`
+    );
+    if (latest.length > 0) {
+      refDate = latest[0].ref_date instanceof Date 
+        ? latest[0].ref_date.toISOString().slice(0, 10) 
+        : String(latest[0].ref_date).slice(0, 10);
+    }
+  }
+  
+  if (!refDate) {
+    return res.json({ ok: false, error: '暂无历史推荐记录', stocks: [], ref_date: null });
+  }
+
+  const { rows } = await db.query(
+    `SELECT code, name, industry, latest_close, pe, composite_score, signals, analysis, created_at
+     FROM stex.recommendations
+     WHERE ref_date = $1
+     ORDER BY composite_score DESC`,
+    [refDate]
+  );
+
+  res.json({
+    ok: true,
+    ref_date: refDate,
+    count: rows.length,
+    stocks: rows.map(r => ({
+      code: r.code,
+      name: r.name,
+      industry: r.industry,
+      latest_close: r.latest_close,
+      pe: r.pe,
+      composite_score: r.composite_score,
+      signals: r.signals || {},
+      analysis: r.analysis,
+      created_at: r.created_at,
+    })),
+  });
+});
